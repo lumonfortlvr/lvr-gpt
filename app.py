@@ -680,18 +680,79 @@ def ensure_content_downloaded():
             shutil.copytree(content_root / "reference", REFERENCE_DIR)
 
 
+def ensure_chroma_db_downloaded():
+    """Downloads the prebuilt chroma_db from a GitHub Release in the private
+    content repo, if one exists — this saves a fresh boot from having to
+    re-embed every transcript from scratch, which is CPU-heavy enough to get
+    the app throttled on Streamlit Cloud's free tier. Silently does nothing
+    if unavailable/unconfigured; load_resources() then builds it from
+    scratch as before."""
+    if CHROMA_DB_DIR.exists() and any(CHROMA_DB_DIR.iterdir()):
+        return
+    token = _get_secret("CONTENT_REPO_TOKEN")
+    if not token:
+        return
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    try:
+        release_resp = httpx.get(
+            f"https://api.github.com/repos/{CONTENT_REPO}/releases/latest",
+            headers=headers,
+            timeout=30,
+        )
+        release_resp.raise_for_status()
+        asset = next(
+            (a for a in release_resp.json().get("assets", []) if a["name"] == "chroma_db.tar.gz"),
+            None,
+        )
+        if not asset:
+            return
+        asset_resp = httpx.get(
+            asset["url"],
+            headers={**headers, "Accept": "application/octet-stream"},
+            follow_redirects=True,
+            timeout=180,
+        )
+        asset_resp.raise_for_status()
+    except httpx.HTTPError:
+        return  # fall back to building from scratch
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        archive_path = tmp_path / "chroma_db.tar.gz"
+        archive_path.write_bytes(asset_resp.content)
+        with tarfile.open(archive_path) as tar:
+            tar.extractall(tmp_path)
+        extracted = tmp_path / "chroma_db"
+        if extracted.exists():
+            shutil.copytree(extracted, CHROMA_DB_DIR, dirs_exist_ok=True)
+
+
 # ── Resource loading ──────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading knowledge base...")
 def load_resources():
     embed_model = SentenceTransformer(EMBED_MODEL)
-    chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
-    collection = chroma_client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
-    if collection.count() == 0:
-        # First boot on a fresh container (e.g. Streamlit Cloud, where the
-        # prebuilt chroma_db/ isn't in git): download the private content
+    ensure_chroma_db_downloaded()
+
+    def _open_collection():
+        client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
+        coll = client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        return client, coll
+
+    try:
+        chroma_client, collection = _open_collection()
+        needs_build = collection.count() == 0
+    except Exception:
+        # A downloaded DB that doesn't load cleanly (e.g. version mismatch) —
+        # wipe it and rebuild from scratch instead of crashing.
+        shutil.rmtree(CHROMA_DB_DIR, ignore_errors=True)
+        chroma_client, collection = _open_collection()
+        needs_build = True
+
+    if needs_build:
+        # First boot with no usable chroma_db: download the private content
         # repo if needed, then build the index from it. Runs once — cached
         # by st.cache_resource.
         with st.spinner("Building knowledge base for the first time — this can take a few minutes..."):
