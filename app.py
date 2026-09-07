@@ -230,11 +230,16 @@ h1, h2, h3 {
 [data-testid="stChatMessageAvatarAssistant"] {
     display: none !important;
 }
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+    display: flex !important;
+    justify-content: flex-end !important;
+}
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"] {
     background-color: var(--lvr-surface) !important;
     border-radius: 16px !important;
     padding: 0.7rem 1.1rem !important;
     display: inline-block;
+    max-width: 80%;
 }
 [data-testid="stChatMessage"] p,
 [data-testid="stChatMessage"] li,
