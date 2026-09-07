@@ -1,0 +1,10 @@
+.env
+venv/
+chroma_db/
+chroma_db_broken_backup_20260817/
+.streamlit/secrets.toml
+transcripts/
+reference/
+__pycache__/
+*.pyc
+.DS_Store
