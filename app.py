@@ -760,7 +760,9 @@ def load_resources():
             ingest_from_dir(TRANSCRIPTS_DIR, embed_model, collection, source_type="class", log=lambda *a: None)
             ingest_from_dir(REFERENCE_DIR, embed_model, collection, source_type="reference", log=lambda *a: None)
     api_key = _get_secret("ANTHROPIC_API_KEY")
-    anthropic_client = anthropic.Anthropic(api_key=api_key)
+    # Without an explicit timeout, a network hiccup can leave the app hanging
+    # indefinitely with no visible error — fail fast instead.
+    anthropic_client = anthropic.Anthropic(api_key=api_key, timeout=60.0)
     return embed_model, collection, anthropic_client
 
 
@@ -918,8 +920,10 @@ def main():
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        print(f"[chat] retrieving context for: {prompt[:80]!r}", flush=True)
         chunks = retrieve(prompt, embed_model, collection)
         context = build_context(chunks)
+        print(f"[chat] retrieved {len(chunks)} chunks, calling Claude", flush=True)
 
         claude_messages = []
         for m in active_chat["messages"][:-1]:
@@ -934,15 +938,25 @@ def main():
             response_placeholder = st.empty()
             full_response = ""
 
-            with anthropic_client.messages.stream(
-                model=CLAUDE_MODEL,
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
-                messages=claude_messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    full_response += text
-                    response_placeholder.markdown(full_response + "▌")
+            try:
+                with anthropic_client.messages.stream(
+                    model=CLAUDE_MODEL,
+                    max_tokens=1024,
+                    system=SYSTEM_PROMPT,
+                    messages=claude_messages,
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_response += text
+                        response_placeholder.markdown(full_response + "▌")
+                print("[chat] Claude response complete", flush=True)
+            except Exception as e:
+                print(f"[chat] Claude call failed: {e!r}", flush=True)
+                response_placeholder.error(
+                    "Something went wrong generating a response. Please try again."
+                )
+                st.exception(e)
+                active_chat["messages"].pop()  # drop the user turn that never got a reply
+                st.stop()
 
             suggestion = suggest_class_to_watch(prompt, embed_model, collection)
             if suggestion:
