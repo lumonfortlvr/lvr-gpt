@@ -103,7 +103,8 @@ not in every sentence — okay?, alright?, you know?, right?, guys, I mean.
   - Sentence style: short-to-medium sentences; think out loud, sometimes \
 rephrasing mid-thought before landing the point.
   - Avoid: corporate language, vague platitudes, academic/theoretical \
-framing, moralising repetition.
+framing, moralising repetition, and dashes (em dashes or hyphens used as \
+punctuation) — write in plain sentences or split into two instead.
   - Draw on recurring themes when relevant: treat yourself as a business, \
 hustle/chasing is non-negotiable, networking matters, online presence is a \
 first impression, persistence over annoyance.
@@ -829,21 +830,60 @@ def build_context(chunks: list) -> str:
     return "\n\n".join(parts)
 
 
+# The only session names ever shown to a student, regardless of which raw
+# transcript (old cohort names, internal Q&A labels, co-host mentions, etc.)
+# actually matched — keyword -> official display name, checked in order.
+CANONICAL_SESSIONS = [
+    ("business side", "Session 1: The Business Side w/ Leticia van Riel"),
+    ("artist role", "Session 2: The Artist Role w/ Victor Ruiz"),
+    ("social media", "Session 3: Social Media & Branding w/ Marcus O'Sullivan"),
+    ("branding", "Session 3: Social Media & Branding w/ Marcus O'Sullivan"),
+    ("agent", "Session 4: The Agent w/ Dylan First"),
+    ("promoter", "Session 5: Promoter w/ Victor De La Serna"),
+    ("labels", "Session 6: Labels & Releases w/ Nick Garcia"),
+    ("releases", "Session 6: Labels & Releases w/ Nick Garcia"),
+    ("ads expert", "Bonus Session: Becoming an Ads Expert"),
+]
+DEFAULT_SESSION = "Session 1: The Business Side w/ Leticia van Riel"
+
+
+def _canonical_session_name(text: str):
+    lowered = text.lower()
+    for keyword, name in CANONICAL_SESSIONS:
+        if keyword in lowered:
+            return name
+    return None
+
+
 def suggest_class_to_watch(query: str, embed_model, collection):
-    """Finds the single best-matching class recording for this query — never
-    a reference document — to recommend at the end of an answer. Returns
-    None if the knowledge base has no class recordings at all."""
+    """Finds the best-matching class recording for this query and maps it to
+    one of the official session names — raw transcript filenames (old cohort
+    names, internal Q&A labels, co-host names) are never shown to students.
+    Falls back to matching the query's own topic, then to a default session,
+    so every answer gets a valid suggestion. Returns None only if the
+    knowledge base has no class recordings at all."""
     query_embedding = embed_model.encode([query]).tolist()
     results = collection.query(
         query_embeddings=query_embedding,
-        n_results=1,
+        n_results=10,
         where={"source_type": "class"},
         include=["metadatas"],
     )
     metadatas = results.get("metadatas", [[]])[0]
     if not metadatas:
         return None
-    return _pretty_source_name(metadatas[0]["source_file"])
+
+    # A single top chunk is noisy (duplicate/near-duplicate segments of the
+    # same file, or a tangentially-similar but off-topic file, often rank
+    # highest) — a majority vote across the top 10 is far more reliable.
+    votes = {}
+    for meta in metadatas:
+        name = _canonical_session_name(meta["source_file"])
+        if name:
+            votes[name] = votes.get(name, 0) + 1
+    if votes:
+        return max(votes, key=votes.get)
+    return _canonical_session_name(query) or DEFAULT_SESSION
 
 
 # ── Main app ──────────────────────────────────────────────────────────────────
