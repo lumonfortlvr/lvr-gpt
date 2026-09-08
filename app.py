@@ -19,9 +19,9 @@ import httpx
 import streamlit as st
 from dotenv import load_dotenv
 import chromadb
-from sentence_transformers import SentenceTransformer
 import anthropic
 
+from embeddings import embed_texts
 from ingest import ingest_from_dir
 
 load_dotenv(Path(__file__).parent / ".env", override=True)
@@ -32,7 +32,6 @@ TRANSCRIPTS_DIR = Path(os.environ.get("TRANSCRIPTS_DIR", str(Path(__file__).pare
 REFERENCE_DIR = Path(os.environ.get("REFERENCE_DIR", str(Path(__file__).parent / "reference")))
 STICKER_PATH = Path(__file__).parent / "assets" / "lvr-sticker.png"
 COLLECTION_NAME = "class_transcripts"
-EMBED_MODEL = "all-MiniLM-L6-v2"
 CLAUDE_MODEL = "claude-sonnet-4-6"
 TOP_K = 5
 
@@ -758,7 +757,7 @@ def ensure_chroma_db_downloaded():
 # ── Resource loading ──────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading knowledge base...")
 def load_resources():
-    embed_model = SentenceTransformer(EMBED_MODEL)
+    voyage_api_key = _get_secret("VOYAGE_API_KEY")
     ensure_chroma_db_downloaded()
 
     def _open_collection():
@@ -785,18 +784,18 @@ def load_resources():
         # by st.cache_resource.
         with st.spinner("Building knowledge base for the first time — this can take a few minutes..."):
             ensure_content_downloaded()
-            ingest_from_dir(TRANSCRIPTS_DIR, embed_model, collection, source_type="class", log=lambda *a: None)
-            ingest_from_dir(REFERENCE_DIR, embed_model, collection, source_type="reference", log=lambda *a: None)
-    api_key = _get_secret("ANTHROPIC_API_KEY")
+            ingest_from_dir(TRANSCRIPTS_DIR, voyage_api_key, collection, source_type="class", log=lambda *a: None)
+            ingest_from_dir(REFERENCE_DIR, voyage_api_key, collection, source_type="reference", log=lambda *a: None)
+    anthropic_api_key = _get_secret("ANTHROPIC_API_KEY")
     # Without an explicit timeout, a network hiccup can leave the app hanging
     # indefinitely with no visible error — fail fast instead.
-    anthropic_client = anthropic.Anthropic(api_key=api_key, timeout=60.0)
-    return embed_model, collection, anthropic_client
+    anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key, timeout=60.0)
+    return voyage_api_key, collection, anthropic_client
 
 
 # ── RAG retrieval ─────────────────────────────────────────────────────────────
-def retrieve(query: str, embed_model, collection) -> list:
-    query_embedding = embed_model.encode([query]).tolist()
+def retrieve(query: str, voyage_api_key: str, collection) -> list:
+    query_embedding = embed_texts([query], input_type="query", api_key=voyage_api_key)
     results = collection.query(
         query_embeddings=query_embedding,
         n_results=TOP_K,
@@ -832,37 +831,44 @@ def build_context(chunks: list) -> str:
 
 # The only session names ever shown to a student, regardless of which raw
 # transcript (old cohort names, internal Q&A labels, co-host mentions, etc.)
-# actually matched — keyword -> official display name, checked in order.
+# actually matched. Each topic is a set of words that must ALL appear
+# (in any order, anywhere in the text) — not a fixed phrase, so "role as an
+# artist" and "artist role" both match, and "a label" matches "labels".
 CANONICAL_SESSIONS = [
-    ("business side", "Session 1: The Business Side w/ Leticia van Riel"),
-    ("artist role", "Session 2: The Artist Role w/ Victor Ruiz"),
-    ("social media", "Session 3: Social Media & Branding w/ Marcus O'Sullivan"),
-    ("branding", "Session 3: Social Media & Branding w/ Marcus O'Sullivan"),
-    ("agent", "Session 4: The Agent w/ Dylan First"),
-    ("promoter", "Session 5: Promoter w/ Victor De La Serna"),
-    ("labels", "Session 6: Labels & Releases w/ Nick Garcia"),
-    ("releases", "Session 6: Labels & Releases w/ Nick Garcia"),
-    ("ads expert", "Bonus Session: Becoming an Ads Expert"),
+    (["business", "side"], "Session 1: The Business Side w/ Leticia van Riel"),
+    (["artist", "role"], "Session 2: The Artist Role w/ Victor Ruiz"),
+    (["social", "media"], "Session 3: Social Media & Branding w/ Marcus O'Sullivan"),
+    (["branding"], "Session 3: Social Media & Branding w/ Marcus O'Sullivan"),
+    (["agent"], "Session 4: The Agent w/ Dylan First"),
+    (["promoter"], "Session 5: Promoter w/ Victor De La Serna"),
+    (["label"], "Session 6: Labels & Releases w/ Nick Garcia"),
+    (["release"], "Session 6: Labels & Releases w/ Nick Garcia"),
+    (["ads", "expert"], "Bonus Session: Becoming an Ads Expert"),
 ]
 DEFAULT_SESSION = "Session 1: The Business Side w/ Leticia van Riel"
 
 
 def _canonical_session_name(text: str):
     lowered = text.lower()
-    for keyword, name in CANONICAL_SESSIONS:
-        if keyword in lowered:
+    for keywords, name in CANONICAL_SESSIONS:
+        if all(k in lowered for k in keywords):
             return name
     return None
 
 
-def suggest_class_to_watch(query: str, embed_model, collection):
-    """Finds the best-matching class recording for this query and maps it to
-    one of the official session names — raw transcript filenames (old cohort
-    names, internal Q&A labels, co-host names) are never shown to students.
-    Falls back to matching the query's own topic, then to a default session,
-    so every answer gets a valid suggestion. Returns None only if the
+def suggest_class_to_watch(query: str, voyage_api_key: str, collection):
+    """Finds the official session name to recommend for this query — raw
+    transcript filenames (old cohort names, internal Q&A labels, co-host
+    names) are never shown to students. Checks the query's own wording
+    first (the most direct, reliable signal), then falls back to a majority
+    vote across the top 10 retrieved chunks, then to a default session, so
+    every answer gets a valid suggestion. Returns None only if the
     knowledge base has no class recordings at all."""
-    query_embedding = embed_model.encode([query]).tolist()
+    query_name = _canonical_session_name(query)
+    if query_name:
+        return query_name
+
+    query_embedding = embed_texts([query], input_type="query", api_key=voyage_api_key)
     results = collection.query(
         query_embeddings=query_embedding,
         n_results=10,
@@ -881,9 +887,7 @@ def suggest_class_to_watch(query: str, embed_model, collection):
         name = _canonical_session_name(meta["source_file"])
         if name:
             votes[name] = votes.get(name, 0) + 1
-    if votes:
-        return max(votes, key=votes.get)
-    return _canonical_session_name(query) or DEFAULT_SESSION
+    return max(votes, key=votes.get) if votes else DEFAULT_SESSION
 
 
 # ── Main app ──────────────────────────────────────────────────────────────────
@@ -905,7 +909,7 @@ def main():
     st.markdown(LVR_CSS, unsafe_allow_html=True)
 
     try:
-        embed_model, collection, anthropic_client = load_resources()
+        voyage_api_key, collection, anthropic_client = load_resources()
     except Exception as e:
         st.error("Could not load the knowledge base.")
         st.exception(e)
@@ -988,7 +992,7 @@ def main():
             st.markdown(prompt)
 
         print(f"[chat] retrieving context for: {prompt[:80]!r}", flush=True)
-        chunks = retrieve(prompt, embed_model, collection)
+        chunks = retrieve(prompt, voyage_api_key, collection)
         context = build_context(chunks)
         print(f"[chat] retrieved {len(chunks)} chunks, calling Claude", flush=True)
 
@@ -1025,7 +1029,7 @@ def main():
                 active_chat["messages"].pop()  # drop the user turn that never got a reply
                 st.stop()
 
-            suggestion = suggest_class_to_watch(prompt, embed_model, collection)
+            suggestion = suggest_class_to_watch(prompt, voyage_api_key, collection)
             if suggestion:
                 full_response += f"\n\n---\n🎬 **Suggested class to watch:** {suggestion}"
 

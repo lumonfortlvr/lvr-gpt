@@ -16,7 +16,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 import chromadb
-from sentence_transformers import SentenceTransformer
+
+from embeddings import embed_texts
 
 load_dotenv()
 
@@ -34,7 +35,6 @@ CHUNK_SIZE = 15          # segments per chunk (JSON mode)
 CHUNK_OVERLAP = 3        # segment overlap (JSON mode)
 TXT_CHUNK_WORDS = 300    # words per chunk (TXT mode)
 TXT_CHUNK_OVERLAP = 50   # word overlap (TXT mode)
-EMBED_MODEL = "all-MiniLM-L6-v2"
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ def _fmt_ts(seconds: float) -> str:
 
 # ── Main ingestion ────────────────────────────────────────────────────────────
 
-def ingest_from_dir(transcripts_dir: Path, model, collection, source_type="class", log=print) -> int:
+def ingest_from_dir(transcripts_dir: Path, api_key: str, collection, source_type="class", log=print) -> int:
     """Chunks + embeds every transcript in transcripts_dir into collection.
     Idempotent — re-running replaces any existing chunks for a given source file.
     source_type is tagged on every chunk's metadata ("class" for session
@@ -149,7 +149,7 @@ def ingest_from_dir(transcripts_dir: Path, model, collection, source_type="class
 
         log(f"  → {len(chunks)} chunks")
         texts = [c["text"] for c in chunks]
-        embeddings = model.encode(texts, show_progress_bar=True).tolist()
+        embeddings = embed_texts(texts, input_type="document", api_key=api_key)
 
         ids = [f"{source_name}_chunk_{i}" for i in range(len(chunks))]
         metadatas = [
@@ -175,8 +175,9 @@ def ingest_from_dir(transcripts_dir: Path, model, collection, source_type="class
 
 
 def ingest():
-    print(f"Loading embedding model: {EMBED_MODEL}")
-    model = SentenceTransformer(EMBED_MODEL)
+    api_key = os.environ.get("VOYAGE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("VOYAGE_API_KEY is not set in the environment or .env file.")
 
     print(f"Connecting to ChromaDB at: {CHROMA_DB_DIR}")
     client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
@@ -185,8 +186,8 @@ def ingest():
         metadata={"hnsw:space": "cosine"},
     )
 
-    ingest_from_dir(TRANSCRIPTS_DIR, model, collection, source_type="class")
-    ingest_from_dir(REFERENCE_DIR, model, collection, source_type="reference")
+    ingest_from_dir(TRANSCRIPTS_DIR, api_key, collection, source_type="class")
+    ingest_from_dir(REFERENCE_DIR, api_key, collection, source_type="reference")
 
 
 if __name__ == "__main__":
