@@ -938,7 +938,7 @@ def suggest_class_to_watch(query: str, voyage_api_key: str, collection):
 def main():
     st.set_page_config(
         page_title="LvR GPT",
-        page_icon="⚡",
+        page_icon=str(STICKER_PATH),
         layout="centered",
     )
 
