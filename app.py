@@ -31,6 +31,10 @@ CHROMA_DB_DIR = Path(__file__).parent / "chroma_db"
 TRANSCRIPTS_DIR = Path(os.environ.get("TRANSCRIPTS_DIR", str(Path(__file__).parent / "transcripts")))
 REFERENCE_DIR = Path(os.environ.get("REFERENCE_DIR", str(Path(__file__).parent / "reference")))
 STICKER_PATH = Path(__file__).parent / "assets" / "lvr-sticker.png"
+# Flattened RGB copy for the favicon — Streamlit's favicon code hardcodes
+# channels="RGB" and silently falls back to its own default icon if given
+# an RGBA (transparent) image.
+FAVICON_PATH = Path(__file__).parent / "assets" / "lvr-favicon.png"
 COLLECTION_NAME = "class_transcripts"
 CLAUDE_MODEL = "claude-sonnet-4-6"
 TOP_K = 5
@@ -938,7 +942,7 @@ def suggest_class_to_watch(query: str, voyage_api_key: str, collection):
 def main():
     st.set_page_config(
         page_title="LvR GPT",
-        page_icon=str(STICKER_PATH),
+        page_icon=str(FAVICON_PATH),
         layout="centered",
     )
 
