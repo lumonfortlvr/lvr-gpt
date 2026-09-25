@@ -62,6 +62,13 @@ DAILY_MESSAGE_LIMIT = int(os.environ.get("DAILY_MESSAGE_LIMIT", "40"))
 MAX_MESSAGE_CHARS = 2000
 ADMIN_USAGE_KEY = "__admin__"  # exempt from the daily cap (Leticia's own login)
 
+# Separate demo password (e.g. for investors/partners to try the app) — a
+# distinct credential from ADMIN_PASSWORD, capped at a small LIFETIME total
+# rather than a daily allowance, so it's safe to hand out without needing to
+# rotate it right after and without granting anything close to real access.
+DEMO_USAGE_KEY = "__demo__"
+DEMO_MESSAGE_LIMIT = int(os.environ.get("DEMO_MESSAGE_LIMIT", "5"))
+
 # Off-topic guard — if nothing relevant comes back from the knowledge base,
 # skip the Claude call entirely rather than letting an unrelated/jailbreak
 # prompt through with no grounding at all. Cosine distance ranges ~0 (identical)
@@ -111,15 +118,25 @@ def _save_usage(data: dict) -> None:
 
 
 def check_and_record_usage(user_key: str, limit: int = DAILY_MESSAGE_LIMIT) -> bool:
-    """Best-effort daily message quota per logged-in email, backed by a small
+    """Best-effort message quota per logged-in identity, backed by a small
     local JSON file (not a database — this is a practical cost guard against
     one account looping the chat endpoint, not an airtight/concurrency-safe
-    limiter). Returns True and records the message if still under quota for
-    today (UTC), False if the quota is already used up. Admin is exempt."""
+    limiter). Admin is exempt entirely. The demo login gets a small LIFETIME
+    total (never resets) instead of the regular daily allowance that resets
+    each day (UTC), since it's meant for a handful of one-time try-outs, not
+    ongoing use. Returns True and records the message if still under quota,
+    False if the quota is already used up."""
     if user_key == ADMIN_USAGE_KEY:
         return True
-    today = _today_str()
     data = _load_usage()
+    if user_key == DEMO_USAGE_KEY:
+        count = data.get(user_key, {}).get("total", 0)
+        if count >= DEMO_MESSAGE_LIMIT:
+            return False
+        data[user_key] = {"total": count + 1}
+        _save_usage(data)
+        return True
+    today = _today_str()
     count = data.get(user_key, {}).get(today, 0)
     if count >= limit:
         return False
@@ -666,13 +683,18 @@ def send_magic_link_email(email: str, link: str) -> bool:
 
 def request_login(value: str):
     """Handles a login-screen submission. Returns a dict with at least a
-    "status" key: "admin" (grant immediately), "sent" (magic link emailed),
-    "send_failed" (couldn't email — includes a "dev_link" to test with while
-    RESEND_API_KEY isn't configured yet), "invalid_email", or "not_subscriber"."""
+    "status" key: "admin" (grant immediately), "demo" (grant immediately,
+    capped at DEMO_MESSAGE_LIMIT messages total), "sent" (magic link
+    emailed), "send_failed" (couldn't email — includes a "dev_link" to test
+    with while RESEND_API_KEY isn't configured yet), "invalid_email", or
+    "not_subscriber"."""
     value = value.strip()
     admin_password = _get_secret("ADMIN_PASSWORD")
     if admin_password and hmac.compare_digest(value.encode("utf-8"), admin_password.encode("utf-8")):
         return {"status": "admin"}
+    demo_password = _get_secret("DEMO_PASSWORD")
+    if demo_password and hmac.compare_digest(value.encode("utf-8"), demo_password.encode("utf-8")):
+        return {"status": "demo"}
     if not _is_email(value):
         return {"status": "invalid_email", "message": "Enter the email you used to buy LvR Mentoring ON Demand."}
     if not verify_subscriber(value):
@@ -751,6 +773,10 @@ def show_login():
                     if status == "admin":
                         st.session_state.authenticated = True
                         st.session_state.user_email = ADMIN_USAGE_KEY
+                        st.rerun()
+                    elif status == "demo":
+                        st.session_state.authenticated = True
+                        st.session_state.user_email = DEMO_USAGE_KEY
                         st.rerun()
                     elif status == "sent":
                         st.success(result["message"])
@@ -1123,10 +1149,16 @@ def main():
             with st.chat_message("user"):
                 st.markdown(prompt)
             with st.chat_message("assistant"):
-                st.warning(
-                    "You've reached today's message limit for LvR GPT. "
-                    "It resets tomorrow — thanks for your patience!"
-                )
+                if user_key == DEMO_USAGE_KEY:
+                    st.warning(
+                        f"This demo is capped at {DEMO_MESSAGE_LIMIT} messages — "
+                        "you've used them all. Thanks for trying LvR GPT!"
+                    )
+                else:
+                    st.warning(
+                        "You've reached today's message limit for LvR GPT. "
+                        "It resets tomorrow — thanks for your patience!"
+                    )
             st.stop()
 
         active_chat["messages"].append({"role": "user", "content": prompt})
