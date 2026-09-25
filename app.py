@@ -67,7 +67,7 @@ ADMIN_USAGE_KEY = "__admin__"  # exempt from the daily cap (Leticia's own login)
 # rather than a daily allowance, so it's safe to hand out without needing to
 # rotate it right after and without granting anything close to real access.
 DEMO_USAGE_KEY = "__demo__"
-DEMO_MESSAGE_LIMIT = int(os.environ.get("DEMO_MESSAGE_LIMIT", "5"))
+DEMO_MESSAGE_LIMIT = int(os.environ.get("DEMO_MESSAGE_LIMIT", "15"))
 
 # Off-topic guard — if nothing relevant comes back from the knowledge base,
 # skip the Claude call entirely rather than letting an unrelated/jailbreak
