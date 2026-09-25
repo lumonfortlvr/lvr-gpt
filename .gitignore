@@ -4,6 +4,7 @@ chroma_db*/
 .streamlit/secrets.toml
 transcripts/
 reference/
+usage_log.json
 __pycache__/
 *.pyc
 .DS_Store
